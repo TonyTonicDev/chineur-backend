@@ -6,6 +6,9 @@ import { cors } from "../lib/cors.js";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+const DAILY_FREE_LIMIT = 10;
+const FREE_AD_THRESHOLD = 3;
+
 export default async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -14,19 +17,29 @@ export default async function handler(req, res) {
   const { user, error: authError } = await getUser(req);
   if (authError || !user) return res.status(401).json({ error: "Unauthorized" });
 
-  // Rate limit: 100 analyses/day
+  const premium = await isPremium(user.id);
   const today = new Date().toISOString().split("T")[0];
+
   const { count } = await supabase
     .from("usage")
     .select("*", { count: "exact", head: true })
     .eq("user_id", user.id)
     .eq("date", today);
-  if (count >= 100) return res.status(429).json({ error: "Daily limit reached" });
+
+  const analysesToday = count || 0;
+
+  if (!premium && analysesToday >= DAILY_FREE_LIMIT) {
+    return res.status(429).json({
+      error: "daily_limit_reached",
+      limit: DAILY_FREE_LIMIT,
+      premium_cta: true,
+    });
+  }
 
   const { imageB64, lang, extra } = req.body || {};
   if (!imageB64) return res.status(400).json({ error: "Missing imageB64" });
 
-  const premium = await isPremium(user.id);
+  const show_ad = !premium && analysesToday >= FREE_AD_THRESHOLD;
   const extraNote = extra ? `\nDétail : ${extra}` : "";
 
   const prompts = {
@@ -58,13 +71,23 @@ export default async function handler(req, res) {
 
     result.confiance = result.confiance || "moyenne";
     result.verdict = ["ok","warn","ko"].includes(result.verdict) ? result.verdict : "warn";
-    ["prix_achat_min","prix_achat_max","prix_revente_min","prix_revente_max"].forEach(k => { result[k] = Number(result[k]) || 0; });
+    ["prix_achat_min","prix_achat_max","prix_revente_min","prix_revente_max"].forEach(k => {
+      result[k] = Number(result[k]) || 0;
+    });
     result.verifications = Array.isArray(result.verifications) ? result.verifications : [];
     result.questions_refinement = Array.isArray(result.questions_refinement) ? result.questions_refinement : [];
 
     await supabase.from("usage").insert({ user_id: user.id, date: today });
 
-    return res.status(200).json({ result, premium });
+    return res.status(200).json({
+      result,
+      premium,
+      show_ad,
+      analyses_today: analysesToday + 1,
+      daily_limit: DAILY_FREE_LIMIT,
+      analyses_remaining: premium ? null : DAILY_FREE_LIMIT - analysesToday - 1,
+    });
+
   } catch (err) {
     return res.status(500).json({ error: "Analysis failed: " + err.message });
   }

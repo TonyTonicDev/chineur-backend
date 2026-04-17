@@ -1,0 +1,71 @@
+import Anthropic from "@anthropic-ai/sdk";
+import { getUser } from "../lib/auth.js";
+import { isPremium } from "../lib/subscription.js";
+import { supabase } from "../lib/supabase.js";
+import { cors } from "../lib/cors.js";
+
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+export default async function handler(req, res) {
+  cors(res);
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).end();
+
+  const { user, error: authError } = await getUser(req);
+  if (authError || !user) return res.status(401).json({ error: "Unauthorized" });
+
+  // Rate limit: 100 analyses/day
+  const today = new Date().toISOString().split("T")[0];
+  const { count } = await supabase
+    .from("usage")
+    .select("*", { count: "exact", head: true })
+    .eq("user_id", user.id)
+    .eq("date", today);
+  if (count >= 100) return res.status(429).json({ error: "Daily limit reached" });
+
+  const { imageB64, lang, extra } = req.body || {};
+  if (!imageB64) return res.status(400).json({ error: "Missing imageB64" });
+
+  const premium = await isPremium(user.id);
+  const extraNote = extra ? `\nDétail : ${extra}` : "";
+
+  const prompts = {
+    fr: `Tu es un expert en antiquités, brocante, vintage et objets de collection.${extraNote}\nAnalyse cette image. Réponds UNIQUEMENT avec un JSON valide, aucun texte avant/après :\n{"objet_nom":"...","objet_detail":"marque/modèle/époque","confiance":"haute"|"moyenne"|"faible","confiance_note":"phrase","verdict":"ok"|"warn"|"ko","verdict_label":"Bonne affaire"|"À vérifier"|"Risqué","verdict_desc":"phrase","prix_achat_min":0,"prix_achat_max":0,"prix_revente_min":0,"prix_revente_max":0,"analyse":"2-3 phrases","verifications":["p1","p2","p3"],"questions_refinement":["q1","q2"]}`,
+    en: `You are an expert in antiques, flea markets and collectibles.${extraNote}\nAnalyse this image. Reply ONLY with valid JSON, no text before/after:\n{"objet_nom":"...","objet_detail":"brand/model/era","confiance":"haute"|"moyenne"|"faible","confiance_note":"phrase","verdict":"ok"|"warn"|"ko","verdict_label":"Good deal"|"Check it"|"Risky","verdict_desc":"phrase","prix_achat_min":0,"prix_achat_max":0,"prix_revente_min":0,"prix_revente_max":0,"analyse":"2-3 sentences","verifications":["p1","p2","p3"],"questions_refinement":["q1","q2"]}`,
+    nl: `Je bent expert in antiek en vlooienmarkten.${extraNote}\nAnalyseer dit beeld. Antwoord ALLEEN met geldig JSON:\n{"objet_nom":"...","objet_detail":"merk/model/tijdperk","confiance":"haute"|"moyenne"|"faible","confiance_note":"zin","verdict":"ok"|"warn"|"ko","verdict_label":"Goede deal"|"Controleren"|"Riskant","verdict_desc":"zin","prix_achat_min":0,"prix_achat_max":0,"prix_revente_min":0,"prix_revente_max":0,"analyse":"2-3 zinnen","verifications":["p1","p2","p3"],"questions_refinement":["q1","q2"]}`,
+    es: `Eres experto en antigüedades y mercadillos.${extraNote}\nAnaliza esta imagen. Responde SOLO con JSON válido:\n{"objet_nom":"...","objet_detail":"marca/modelo/época","confiance":"haute"|"moyenne"|"faible","confiance_note":"frase","verdict":"ok"|"warn"|"ko","verdict_label":"Buena oferta"|"Verificar"|"Arriesgado","verdict_desc":"frase","prix_achat_min":0,"prix_achat_max":0,"prix_revente_min":0,"prix_revente_max":0,"analyse":"2-3 frases","verifications":["p1","p2","p3"],"questions_refinement":["q1","q2"]}`,
+  };
+
+  try {
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1200,
+      messages: [{ role: "user", content: [
+        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: imageB64 } },
+        { type: "text", text: prompts[lang] || prompts.fr }
+      ]}]
+    });
+
+    const raw = response.content.map(b => b.type === "text" ? b.text : "").join("");
+    let result = null;
+    for (const fn of [
+      () => JSON.parse(raw.trim()),
+      () => JSON.parse(raw.replace(/^```(?:json)?\s*/, "").replace(/\s*```\s*$/, "").trim()),
+      () => { const m = raw.match(/\{[\s\S]*\}/); if (m) return JSON.parse(m[0]); throw 0; },
+    ]) { try { result = fn(); if (result?.objet_nom) break; result = null; } catch(e) {} }
+
+    if (!result?.objet_nom) throw new Error("Invalid JSON: " + raw.substring(0, 200));
+
+    result.confiance = result.confiance || "moyenne";
+    result.verdict = ["ok","warn","ko"].includes(result.verdict) ? result.verdict : "warn";
+    ["prix_achat_min","prix_achat_max","prix_revente_min","prix_revente_max"].forEach(k => { result[k] = Number(result[k]) || 0; });
+    result.verifications = Array.isArray(result.verifications) ? result.verifications : [];
+    result.questions_refinement = Array.isArray(result.questions_refinement) ? result.questions_refinement : [];
+
+    await supabase.from("usage").insert({ user_id: user.id, date: today });
+
+    return res.status(200).json({ result, premium });
+  } catch (err) {
+    return res.status(500).json({ error: "Analysis failed: " + err.message });
+  }
+}

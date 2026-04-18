@@ -61,7 +61,7 @@ export default async function handler(req, res) {
     else if (imageB64.startsWith("UklGR")) mediaType = "image/webp";
 
     const response = await anthropic.messages.create({
-      model: "claude-3-5-haiku-20241022",
+     model: "claude-3-haiku-20240307",
       max_tokens: 1200,
       messages: [{ role: "user", content: [
         { type: "image", source: { type: "base64", media_type: mediaType, data: imageB64 } },

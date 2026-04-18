@@ -13,29 +13,37 @@ export default async function handler(req, res) {
   if (req.method === "GET") {
     const { data } = await supabase
       .from("profiles")
-      .select("id, username, avatar_url, stripe_customer_id, created_at")
+      .select("id, username, avatar_url, created_at")
       .eq("id", user.id)
-      .single();
+      .maybeSingle();
 
     return res.status(200).json({ profile: data || { id: user.id, username: null } });
   }
 
-  // PATCH — update username or avatar
+  // PATCH — update username
   if (req.method === "PATCH") {
-    const { username, avatar_url } = req.body || {};
-    const updates = {};
-    if (username !== undefined) {
-      if (username.length < 2 || username.length > 30) {
-        return res.status(400).json({ error: "Username must be 2–30 characters" });
-      }
-      updates.username = username.trim();
+    const { username } = req.body || {};
+    if (!username || username.trim().length < 2 || username.trim().length > 25) {
+      return res.status(400).json({ error: "Username must be 2–25 characters" });
     }
-    if (avatar_url !== undefined) updates.avatar_url = avatar_url;
-    if (!Object.keys(updates).length) return res.status(400).json({ error: "Nothing to update" });
+
+    const clean = username.trim();
+
+    // Check uniqueness
+    const { data: existing } = await supabase
+      .from("profiles")
+      .select("id")
+      .eq("username", clean)
+      .neq("id", user.id)
+      .maybeSingle();
+
+    if (existing) {
+      return res.status(409).json({ error: "Ce pseudo est déjà pris. Choisissez-en un autre." });
+    }
 
     const { data, error } = await supabase
       .from("profiles")
-      .upsert({ id: user.id, ...updates })
+      .upsert({ id: user.id, username: clean }, { onConflict: "id" })
       .select()
       .single();
 

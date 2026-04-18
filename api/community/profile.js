@@ -16,17 +16,15 @@ export default async function handler(req, res) {
       .select("id, username, avatar_url, created_at")
       .eq("id", user.id)
       .maybeSingle();
-
     return res.status(200).json({ profile: data || { id: user.id, username: null } });
   }
 
-  // PATCH — update username
-  if (req.method === "PATCH") {
+  // POST — save username (replaces PATCH to avoid CORS issues)
+  if (req.method === "POST") {
     const { username } = req.body || {};
     if (!username || username.trim().length < 2 || username.trim().length > 25) {
       return res.status(400).json({ error: "Username must be 2–25 characters" });
     }
-
     const clean = username.trim();
 
     // Check uniqueness

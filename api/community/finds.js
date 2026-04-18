@@ -10,36 +10,49 @@ export default async function handler(req, res) {
   if (req.method === "GET") {
     const month = new Date().toISOString().substring(0, 7);
     try {
-      const { data, error } = await supabase
+      // Fetch finds
+      const { data: finds, error } = await supabase
         .from("finds")
-        .select("id, name, detail, verdict, prix_revente, prix_paye, marge_reelle, location, image_url, description, created_at, month, user_id, profiles:user_id(username, avatar_url)")
+        .select("id, name, detail, verdict, prix_revente, prix_paye, marge_reelle, location, image_url, description, created_at, month, user_id")
         .eq("month", month)
         .order("created_at", { ascending: false });
 
       if (error) throw error;
+      if (!finds || finds.length === 0) return res.status(200).json({ finds: [] });
 
-      // Fetch votes and comments counts separately
-      const finds = await Promise.all((data || []).map(async f => {
-        const [votesRes, commRes] = await Promise.all([
-          supabase.from("votes").select("direction").eq("find_id", f.id),
-          supabase.from("comments").select("id", { count: "exact", head: true }).eq("find_id", f.id),
-        ]);
-        const votes = votesRes.data || [];
-        const up = votes.filter(v => v.direction === "up").length;
-        const down = votes.filter(v => v.direction === "down").length;
+      // Fetch all votes and comments for these finds in bulk
+      const findIds = finds.map(f => f.id);
+
+      const [votesRes, commRes, profilesRes] = await Promise.all([
+        supabase.from("votes").select("find_id, direction").in("find_id", findIds),
+        supabase.from("comments").select("find_id").in("find_id", findIds),
+        supabase.from("profiles").select("id, username").in("id", finds.map(f => f.user_id)),
+      ]);
+
+      const votes = votesRes.data || [];
+      const comments = commRes.data || [];
+      const profiles = profilesRes.data || [];
+
+      const enriched = finds.map(f => {
+        const fVotes = votes.filter(v => v.find_id === f.id);
+        const up = fVotes.filter(v => v.direction === "up").length;
+        const down = fVotes.filter(v => v.direction === "down").length;
         const net = up - down;
+        const profile = profiles.find(p => p.id === f.user_id);
         return {
           ...f,
           votes_up: up,
           votes_down: down,
           net_votes: net,
-          comment_count: commRes.count || 0,
-          score: net * (f.prix_revente || 0),
+          comment_count: comments.filter(c => c.find_id === f.id).length,
+          score: net * (f.prix_revente || 1), // at least 1 so new items appear
+          username: profile?.username || "chineur",
         };
-      }));
+      });
 
-      finds.sort((a, b) => b.score - a.score);
-      return res.status(200).json({ finds: finds.slice(0, 10) });
+      enriched.sort((a, b) => b.score - a.score);
+      return res.status(200).json({ finds: enriched.slice(0, 10) });
+
     } catch(e) {
       return res.status(500).json({ error: e.message });
     }
@@ -73,7 +86,11 @@ export default async function handler(req, res) {
       if (error) throw error;
 
       // Auto-upvote by sharer
-      await supabase.from("votes").insert({ find_id: data.id, user_id: user.id, direction: "up" });
+      await supabase.from("votes").insert({
+        find_id: data.id,
+        user_id: user.id,
+        direction: "up"
+      });
 
       return res.status(201).json({ find: data });
     } catch(e) {

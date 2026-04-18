@@ -9,19 +9,30 @@ export default async function handler(req, res) {
   const { find_id } = req.query;
   if (!find_id) return res.status(400).json({ error: "Missing find_id" });
 
-  // GET — fetch all comments for a find
+  // GET — fetch all comments
   if (req.method === "GET") {
-    const { data, error } = await supabase
+    const { data: comments, error } = await supabase
       .from("comments")
-      .select(`
-        id, text, created_at,
-        profiles:user_id ( username, avatar_url )
-      `)
+      .select("id, text, created_at, user_id")
       .eq("find_id", find_id)
       .order("created_at", { ascending: true });
 
     if (error) return res.status(500).json({ error: error.message });
-    return res.status(200).json({ comments: data || [] });
+    if (!comments || comments.length === 0) return res.status(200).json({ comments: [] });
+
+    // Fetch usernames separately
+    const userIds = [...new Set(comments.map(c => c.user_id))];
+    const { data: profiles } = await supabase
+      .from("profiles")
+      .select("id, username")
+      .in("id", userIds);
+
+    const enriched = comments.map(c => ({
+      ...c,
+      username: profiles?.find(p => p.id === c.user_id)?.username || "chineur",
+    }));
+
+    return res.status(200).json({ comments: enriched });
   }
 
   // POST — add a comment
@@ -31,36 +42,26 @@ export default async function handler(req, res) {
 
     const { text } = req.body || {};
     if (!text?.trim()) return res.status(400).json({ error: "Missing text" });
-    if (text.length > 500) return res.status(400).json({ error: "Comment too long (max 500 chars)" });
+    if (text.length > 500) return res.status(400).json({ error: "Comment too long" });
 
     const { data, error } = await supabase.from("comments").insert({
       find_id,
       user_id: user.id,
       text: text.trim(),
-    }).select(`
-      id, text, created_at,
-      profiles:user_id ( username, avatar_url )
-    `).single();
+    }).select("id, text, created_at, user_id").single();
 
     if (error) return res.status(500).json({ error: error.message });
-    return res.status(201).json({ comment: data });
-  }
 
-  // DELETE — delete own comment
-  if (req.method === "DELETE") {
-    const { user, error: authError } = await getUser(req);
-    if (authError || !user) return res.status(401).json({ error: "Unauthorized" });
+    // Fetch username
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("username")
+      .eq("id", user.id)
+      .single();
 
-    const { comment_id } = req.body || {};
-    if (!comment_id) return res.status(400).json({ error: "Missing comment_id" });
-
-    const { error } = await supabase.from("comments")
-      .delete()
-      .eq("id", comment_id)
-      .eq("user_id", user.id); // can only delete own comments
-
-    if (error) return res.status(500).json({ error: error.message });
-    return res.status(200).json({ deleted: true });
+    return res.status(201).json({
+      comment: { ...data, username: profile?.username || "chineur" }
+    });
   }
 
   return res.status(405).end();

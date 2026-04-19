@@ -13,14 +13,21 @@ export default async function handler(req, res) {
   const { user, error } = await getUser(req);
   if (error || !user) return res.status(401).json({ error: "Unauthorized" });
 
-  const { successUrl, cancelUrl } = req.body || {};
+  const { successUrl, cancelUrl, plan } = req.body || {};
+
+  // Choose price based on plan (monthly or yearly)
+  const priceId = plan === 'yearly'
+    ? process.env.STRIPE_PRICE_ID_YEARLY
+    : process.env.STRIPE_PRICE_ID;
+
+  if (!priceId) return res.status(500).json({ error: "Price not configured" });
 
   let customerId;
   const { data: profile } = await supabase
     .from("profiles")
     .select("stripe_customer_id")
     .eq("id", user.id)
-    .single();
+    .maybeSingle();
 
   if (profile?.stripe_customer_id) {
     customerId = profile.stripe_customer_id;
@@ -36,9 +43,9 @@ export default async function handler(req, res) {
   const session = await stripe.checkout.sessions.create({
     customer: customerId,
     mode: "subscription",
-    line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
+    line_items: [{ price: priceId, quantity: 1 }],
     success_url: successUrl || `${process.env.APP_URL}?premium=success`,
-    cancel_url:  cancelUrl  || `${process.env.APP_URL}?premium=cancel`,
+    cancel_url: cancelUrl || `${process.env.APP_URL}?premium=cancel`,
     subscription_data: { metadata: { supabase_user_id: user.id } }
   });
 

@@ -7,7 +7,6 @@ import { cors } from "../lib/cors.js";
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const DAILY_FREE_LIMIT = 10;
-const FREE_AD_THRESHOLD = 3;
 
 export default async function handler(req, res) {
   cors(res);
@@ -17,11 +16,13 @@ export default async function handler(req, res) {
   const { user, error: authError } = await getUser(req);
   if (authError || !user) return res.status(401).json({ error: "Unauthorized" });
 
+  // Premium check — graceful fallback if table missing
   let premium = false;
   try { premium = await isPremium(user.id); } catch(e) { premium = false; }
 
   const today = new Date().toISOString().split("T")[0];
 
+  // Usage count — graceful fallback
   let analysesToday = 0;
   try {
     const { count } = await supabase
@@ -43,7 +44,7 @@ export default async function handler(req, res) {
   const { imageB64, lang, extra } = req.body || {};
   if (!imageB64) return res.status(400).json({ error: "Missing imageB64" });
 
-  const show_ad = !premium && analysesToday >= FREE_AD_THRESHOLD;
+
   const extraNote = extra ? `\nDétail : ${extra}` : "";
 
   const prompts = {
@@ -54,6 +55,7 @@ export default async function handler(req, res) {
   };
 
   try {
+    // Detect media type from base64 header or default to jpeg
     let mediaType = "image/jpeg";
     if (imageB64.startsWith("/9j/")) mediaType = "image/jpeg";
     else if (imageB64.startsWith("iVBOR")) mediaType = "image/png";
@@ -61,7 +63,7 @@ export default async function handler(req, res) {
     else if (imageB64.startsWith("UklGR")) mediaType = "image/webp";
 
     const response = await anthropic.messages.create({
-     model: "claude-haiku-4-5-20251001",
+      model: "claude-sonnet-4-20250514",
       max_tokens: 1200,
       messages: [{ role: "user", content: [
         { type: "image", source: { type: "base64", media_type: mediaType, data: imageB64 } },
@@ -87,10 +89,13 @@ export default async function handler(req, res) {
     result.verifications = Array.isArray(result.verifications) ? result.verifications : [];
     result.questions_refinement = Array.isArray(result.questions_refinement) ? result.questions_refinement : [];
 
+    // Log usage — graceful fallback
     try { await supabase.from("usage").insert({ user_id: user.id, date: today }); } catch(e) {}
 
     return res.status(200).json({
-      result, premium, show_ad,
+      result,
+      premium,
+      show_ad: false,
       analyses_today: analysesToday + 1,
       daily_limit: DAILY_FREE_LIMIT,
       analyses_remaining: premium ? null : DAILY_FREE_LIMIT - analysesToday - 1,
@@ -100,3 +105,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Analysis failed: " + err.message });
   }
 }
+
